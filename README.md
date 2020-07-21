@@ -1,2 +1,2 @@
-# Computer-Graphics-
+# Computer-Graphics
 CGVI 
