@@ -1,0 +1,661 @@
+function setup()
+{
+	UI = {};
+	UI.tabs = [];
+	UI.titleLong = 'Simple Camera';
+	UI.titleShort = 'cameraSimple';
+	UI.numFrames = 1000;
+	UI.maxFPS = 24;
+	UI.renderWidth = 800;
+	UI.renderHeight = 400;
+
+	UI.tabs.push(
+		{
+		visible: true,
+		type: `x-shader/x-fragment`,
+		title: `Ray Generation`,
+		id: `RaytracingDemoFS`,
+		initialValue: `//#define SOLUTION_CYLINDER_AND_PLANE
+//#define SOLUTION_MATERIAL
+//#define SOLUTION_SHADOW
+//#define SOLUTION_REFLECTION_REFRACTION
+//#define SOLUTION_FRESNEL
+
+precision highp float;
+
+struct PointLight {
+	vec3 position;
+	vec3 color;
+};
+
+struct Material {
+	vec3  diffuse;
+	vec3  specular;
+	float glossiness;
+	float reflectiveness;
+	float refractiveness;
+	float nextIOR;
+};
+
+struct Sphere {
+	vec3 position;
+	float radius;
+	Material material;
+};
+
+struct Plane {
+	vec3 normal;
+	float d;
+	Material material;
+};
+
+struct Cylinder {
+	vec3 position;
+	vec3 direction;  
+	float radius;
+	Material material;
+};
+
+const int lightCount = 2;
+const int sphereCount = 3;
+const int planeCount = 1;
+const int cylinderCount = 2;
+
+struct Scene {
+	vec3 ambient;
+	PointLight[lightCount] lights;
+	Sphere[sphereCount] spheres;
+	Plane[planeCount] planes;
+	Cylinder[cylinderCount] cylinders;
+};
+
+struct Ray {
+	vec3 origin;
+	vec3 direction;
+};
+
+// Contains all information pertaining to a ray/object intersection
+struct HitInfo {
+	bool hit;
+	float t;
+	vec3 position;
+	vec3 normal;
+	Material material;
+};
+
+HitInfo getEmptyHit() {
+	return HitInfo(
+		false, 
+		0.0, 
+		vec3(0.0), 
+		vec3(0.0), 
+		Material(vec3(0.0), vec3(0.0), 0.0,0.0,0.0,0.0)
+	);
+}
+
+// Sorts the two t values such that t1 is smaller than t2
+void sortT(inout float t1, inout float t2) {
+	// Make t1 the smaller t
+	if(t2 < t1)  {
+		float temp = t1;
+		t1 = t2;
+		t2 = temp;
+	}
+}
+
+// Tests if t is in an interval
+bool isTInInterval(const float t, const float tMin, const float tMax) {
+	return t > tMin && t < tMax;
+}
+
+// Get the smallest t in an interval
+bool getSmallestTInInterval(float t0, float t1, const float tMin, const float tMax, inout float smallestTInInterval) {
+
+	sortT(t0, t1);
+
+	// As t0 is smaller, test this first
+	if(isTInInterval(t0, tMin, tMax)) {
+		smallestTInInterval = t0;
+		return true;
+	}
+
+	// If t0 was not in the interval, still t1 could be
+	if(isTInInterval(t1, tMin, tMax)) {
+		smallestTInInterval = t1;
+		return true;
+	}  
+
+	// None was
+	return false;
+}
+
+HitInfo intersectSphere(const Ray ray, const Sphere sphere, const float tMin, const float tMax) {
+
+	vec3 toSphere = ray.origin - sphere.position;
+
+	float polynomialA = dot(ray.direction, ray.direction);
+	float polynomialB = 2.0 * dot(ray.direction, toSphere);
+	float polynomialC  = dot(toSphere, toSphere) - sphere.radius * sphere.radius;
+	
+	float discriminant = polynomialB * polynomialB - 4.0 * polynomialA * polynomialC;
+	if (discriminant > 0.0) {
+		float t0 = (-polynomialB + sqrt(discriminant)) / (2.0 * polynomialA);
+		float t1 = (-polynomialB - sqrt(discriminant)) / (2.0 * polynomialA);
+
+		float smallestTInInterval;
+		if(!getSmallestTInInterval(t0, t1, tMin, tMax, smallestTInInterval)) {
+			return getEmptyHit();
+		}
+
+		vec3 hitPosition = ray.origin + smallestTInInterval * ray.direction;      
+
+		vec3 normal = 
+			length(ray.origin - sphere.position) < sphere.radius + 0.001? 
+			-normalize(hitPosition - sphere.position) : 
+		normalize(hitPosition - sphere.position);      
+
+		return HitInfo(
+			true,
+			smallestTInInterval,
+			hitPosition,
+			normal,
+			sphere.material);
+	}
+	return getEmptyHit();
+}
+
+HitInfo intersectPlane(const Ray ray,const Plane plane, const float tMin, const float tMax) {
+		//compute the intersection between ray and plane
+		//suppose the ray equatinon is R = ray.origin + t*ray.direction,the plane equatinon is R * plane.normal + plane.d = 0.
+	    //substitute ray equation into plane equation and simplify, then we got function of t below.
+		//intersection test. 
+		if (dot(ray.direction,plane.normal) == 0.0) return getEmptyHit();
+		//If the dot product is not equal to the 0, then the ray dose intersect the plane.
+    	float t = -(dot(ray.origin,plane.normal)+plane.d)/dot(ray.direction,plane.normal);
+		// We need find the intersection point fornt the ray origin, not behind the ray origin.
+	if (t > 0.0) {
+		float smallestTInInterval;
+		//since we only have one t here
+		if(!getSmallestTInInterval(t, t, tMin, tMax, smallestTInInterval)) {
+			return getEmptyHit();
+		}
+		//compute the hitposition using the ray equation.
+		vec3 hitPosition = ray.origin + t * ray.direction;
+
+		return HitInfo(
+			true,
+			t,
+			hitPosition,
+			plane.normal,
+			plane.material);
+	}
+	return getEmptyHit();
+}
+
+float lengthSquared(vec3 x) {
+	return dot(x, x);
+}
+
+HitInfo intersectCylinder(const Ray ray, const Cylinder cylinder, const float tMin, const float tMax) {
+	//Instead of regular cylinder, we have infinite cylinders along the ray.
+	//learning the equation from https://mrl.nyu.edu/~dzorin/rend05/lecture2.pdf
+	//the idea :we can find the distance between intersection point and the center point along the cylinder.direction which similar to the center of sphere and this distance is equal to the cylinder.radius.
+	//doing the similar computation as sphere, and get the value t0,t1.
+    vec3 toCylinder = ray.origin - cylinder.position;
+	float V0= dot(ray.direction, cylinder.direction);
+	vec3 VA = ray.direction - V0*cylinder.direction;
+
+	float polynomialA = dot(VA,VA);
+	float polynomialB = 2.0 * dot(VA, toCylinder - dot(toCylinder,cylinder.direction)*cylinder.direction);
+	float polynomialC  = dot(toCylinder - dot(toCylinder,cylinder.direction)*cylinder.direction,toCylinder - dot(toCylinder,cylinder.direction)*cylinder.direction) - cylinder.radius * cylinder.radius;
+	
+	float discriminant = polynomialB * polynomialB - 4.0 * polynomialA * polynomialC;
+	if (discriminant > 0.0) {
+		float t0 = (-polynomialB + sqrt(discriminant)) / (2.0 * polynomialA);
+		float t1 = (-polynomialB - sqrt(discriminant)) / (2.0 * polynomialA);
+
+		float smallestTInInterval;
+		if(!getSmallestTInInterval(t0, t1, tMin, tMax, smallestTInInterval)) {
+			return getEmptyHit();
+		}
+		
+		//compute the hitposition using smaller t and ray equation.
+		vec3 hitPosition = ray.origin + smallestTInInterval * ray.direction;      
+		// get the normal of cylinder at intersection point.
+		// we need find the position of axis which cylinder grows along.
+		// and get the 'center of cylinder'
+		// using the hitposition subtract the 'center of cylinder', then we can get the normal at intersection point
+		float axis = dot(cylinder.direction, (hitPosition - cylinder.position));
+    	vec3 normal = normalize(hitPosition - (cylinder.direction * axis +cylinder.position)); 
+
+    return HitInfo(
+        true,
+        smallestTInInterval,
+        hitPosition,
+        normal,
+        cylinder.material);
+  }
+  return getEmptyHit();
+}
+
+HitInfo getBetterHitInfo(const HitInfo oldHitInfo, const HitInfo newHitInfo) {
+	if(newHitInfo.hit)
+		if(newHitInfo.t < oldHitInfo.t)  // No need to test for the interval, this has to be done per-primitive
+			return newHitInfo;
+	return oldHitInfo;
+}
+
+HitInfo intersectScene(const Scene scene, const Ray ray, const float tMin, const float tMax) {
+	HitInfo bestHitInfo;
+	bestHitInfo.t = tMax;
+	bestHitInfo.hit = false;
+	for (int i = 0; i < cylinderCount; ++i) {
+		bestHitInfo = getBetterHitInfo(bestHitInfo, intersectCylinder(ray, scene.cylinders[i], tMin, tMax));
+	}
+	for (int i = 0; i < sphereCount; ++i) {
+		bestHitInfo = getBetterHitInfo(bestHitInfo, intersectSphere(ray, scene.spheres[i], tMin, tMax));
+	}
+	for (int i = 0; i < planeCount; ++i) {
+		bestHitInfo = getBetterHitInfo(bestHitInfo, intersectPlane(ray, scene.planes[i], tMin, tMax));
+	}
+
+	return bestHitInfo;
+}
+
+vec3 shadeFromLight(
+	const Scene scene,
+	const Ray ray,
+	const HitInfo hitInfo,
+	const PointLight light)
+{ 
+	vec3 hitToLight = light.position - hitInfo.position;
+
+	vec3 lightDirection = normalize(hitToLight);
+	vec3 viewDirection = normalize(hitInfo.position - ray.origin);
+	vec3 reflectedDirection = reflect(viewDirection, hitInfo.normal);
+	float diffuse_term = max(0.0, dot(lightDirection, hitInfo.normal));
+	float specular_term  = pow(max(0.0, dot(lightDirection, reflectedDirection)), hitInfo.material.glossiness);
+	//find the ray from hit position to the light.
+	//typical error can be made here is 1.the direction of this ray.
+	//2.we cannot set tmin = 0.0,instead we set a small number closed to 0.
+	
+	Ray shadowRay = Ray(hitInfo.position, lightDirection);
+	float tMin = 0.0001;
+	float tMax = length(hitToLight);
+	//We need to find if there any ohter scene between the hitposition and the light.
+	//and if the intersection parameter t must between tmin-closer to 0 and tmax-length of hitToLight ,there is something between light and object, therefore visibility should be 0 in this case. Otherwise, the visibility is 1.0;
+	HitInfo hideInfo  = intersectScene(scene, shadowRay, tMin, tMax);
+    float visibility = 1.0;
+	if(hideInfo.hit){visibility = 0.0;}
+
+	Ray mirrorRay;
+	mirrorRay.origin = hitInfo.position;
+	mirrorRay.direction = reflect(lightDirection, hitInfo.normal);
+	HitInfo mirrorHitInfo = intersectScene(scene, mirrorRay, 0.001, 100000.0);
+
+	return 	visibility * 
+		light.color * (
+			specular_term * hitInfo.material.specular +
+			diffuse_term * hitInfo.material.diffuse);
+}
+
+vec3 background(const Ray ray) {
+	// A simple implicit sky that can be used for the background
+	return vec3(0.2) + vec3(0.8, 0.6, 0.5) * max(0.0, ray.direction.y);
+}
+
+// It seems to be a WebGL issue that the third parameter needs to be inout instea dof const on Tobias' machine
+vec3 shade(const Scene scene, const Ray ray, inout HitInfo hitInfo) {
+
+	if(!hitInfo.hit) {
+		return background(ray);
+	}
+
+	vec3 shading = scene.ambient * hitInfo.material.diffuse;
+	for (int i = 0; i < lightCount; ++i) {
+		shading += shadeFromLight(scene, ray, hitInfo, scene.lights[i]); 
+	}
+	return shading;
+}
+
+uniform vec2 g_resolution;
+
+Ray getFragCoordRay(const vec2 frag_coord) {
+	float sensorDistance = 1.0;
+	vec2 sensorMin = vec2(-1, -0.5);
+	vec2 sensorMax = vec2(1, 0.5);
+	vec2 pixelSize = (sensorMax- sensorMin) / vec2(g_resolution.x, g_resolution.y);
+	vec3 origin = vec3(0, 0, sensorDistance);
+	vec3 direction = normalize(vec3(sensorMin + pixelSize * frag_coord, -sensorDistance));  
+
+	return Ray(origin, direction);
+}
+
+float fresnel(const vec3 viewDirection, const vec3 normal) {
+	//Not using Schlick's approximation , because it need the reflection coefficient for incoming light. We may change the signature in the case. Instead, just simply use the dot product.
+	//research on the https://docs.unrealengine.com/en-US/Engine/Rendering/Materials/HowTo/Fresnel/index.html
+	//https://en.wikipedia.org/wiki/Schlick%27s_approximation
+	//https://www.scratchapixel.com/lessons/3d-basic-rendering/introduction-to-shading/reflection-refraction-fresnel
+	//Fresnel is the term used to describe how the light you see reflects at different intensities based off of the angle you are viewing it from.
+	//we want the the reflection and refraction become different on the each side. And from the coursework pdf, we can see we need more relection the right side of the sphere.Therefore, we vary the the index of fresnel according viewdirection and normal vector.
+	//The fresnel function is given during the lab.
+	//we need to have a small bias,otherwise we will always get fresenl = =1.0;
+	//Adujusting the bias, scale and power according to the picture provided in the course work.
+	float r = max(0.0, min(1.0,0.05 + 1.2 * pow((1.0 + dot(viewDirection,normal)),2.0)));
+	return r;
+}
+
+vec3 colorForFragment(const Scene scene, const vec2 fragCoord) {
+
+	Ray initialRay = getFragCoordRay(fragCoord);  
+	HitInfo initialHitInfo = intersectScene(scene, initialRay, 0.001, 10000.0);  
+	vec3 result = shade(scene, initialRay, initialHitInfo);
+
+	Ray currentRay;
+	HitInfo currentHitInfo;
+
+	// Compute the reflection
+	currentRay = initialRay;
+	currentHitInfo = initialHitInfo;
+
+	// The initial strength of the reflection
+	float reflectionWeight = 1.0;
+
+	const int maxReflectionStepCount = 2;
+	for(int i = 0; i < maxReflectionStepCount; i++) {
+
+		if(!currentHitInfo.hit) break;
+		//the weight of reflection in fresnel effect times original reflection weight.
+		//From the recursive formula in the slides, we know that during the each recursion we need to times the the reflection rate to the shade.
+		reflectionWeight *= currentHitInfo.material.reflectiveness*fresnel(currentRay.direction,currentHitInfo.normal);
+
+		Ray nextRay;
+		nextRay.origin = currentHitInfo.position;
+		//using the built-in function reflect.https://www.khronos.org/registry/OpenGL-Refpages/gl4/html/reflect.xhtml
+		nextRay.direction = reflect(normalize(currentRay.direction), normalize(currentHitInfo.normal));
+	
+		currentRay = nextRay;
+
+		currentHitInfo = intersectScene(scene, currentRay, 0.001, 10000.0);      
+
+		result += reflectionWeight * shade(scene, currentRay, currentHitInfo);
+	}
+
+	// Compute the refraction
+	currentRay = initialRay;  
+	currentHitInfo = initialHitInfo;
+
+	// The initial medium is air
+	float currentIOR = 1.0;
+
+	// The initial strength of the refraction.
+	float refractionWeight = 1.0;
+
+	const int maxRefractionStepCount = 2;
+	for(int i = 0; i < maxRefractionStepCount; i++) {
+		if(!currentHitInfo.hit) break;
+		//the weight of refraction in the fresnel effect which is 1 - the weight of reflection by assumption and times original reflection weight.
+		//From the recursive formula in the slides, we know that during the each recursion we need to times the the refraction rate to the shade.
+		refractionWeight *= currentHitInfo.material.refractiveness*(1.0-fresnel(currentRay.direction,currentHitInfo.normal));    
+		reflectionWeight *= 0.5;      
+    
+		Ray nextRay;
+		float refract_eta = currentIOR/currentHitInfo.material.nextIOR;
+		nextRay.origin = currentHitInfo.position;
+		nextRay.direction = refract(normalize(currentRay.direction), normalize(currentHitInfo.normal), refract_eta);
+		currentRay = nextRay;
+		
+		currentHitInfo = intersectScene(scene, currentRay, 0.001, 10000.0);
+
+		result += refractionWeight * shade(scene, currentRay, currentHitInfo);
+	}
+	return result;
+}
+
+Material getDefaultMaterial() {
+	return Material(vec3(0.3), vec3(0), 1.0,1.0,1.0,1.0);
+}
+//Adjust the marterial index according to the image from the coursework pdf.
+//Each corresponding Index of Refraction values is taking from https://pixelandpoly.com/ior.html.
+Material getPaperMaterial() {
+	//paper material looks like the pear material which we can take the similar diffuse which relatively high. 
+	//With very low specular,since not exist a bright specular point.
+	//glossiness is very low.
+	//relection and refraction should be zero, since in the real world paper is not transparent and cannot relect the image in most case.
+	return Material(vec3(0.7), vec3(0.01), 0.2, 0.0, 0.0,1.3);
+}
+
+Material getPlasticMaterial() {
+	//search the diffuse,specular, and glossiness of yellow plastic online and adjust it.
+	//diffuse should close to the yellow color.
+	//spcular and glossiness are both high, since there is a clear bright point on the yellow sphere.Comparing with the specular phenomenology from the slide.
+	//relection and refraction are both low, because the sphere and the cylinder looks a little bit dark.
+	return Material(vec3(0.5,0.5,0.2), vec3(0.6,0.6,0.5), 12.0, 0.3,0.1,1.46);
+}
+
+Material getGlassMaterial() {
+	//glass is transparent and doesn't reflect much light.
+	//the diffuse, spcular and glossiness should be very low.
+	//with median reflectiveness and high refractivness.
+	return Material(vec3(0.1), vec3(0.01), 0.01, 0.6,1.0,1.25);
+}
+
+Material getSteelMirrorMaterial() {
+	//The steel is in dark color,therefore the diffuse and  should be small number.
+	//since the mirror material reflect lots of light, the refelctiveness should be high, but the refractiveness should be low.
+	return Material(vec3(0.1), vec3(0.1), 0.2, 0.7 , 0.2, 1.6);
+}
+vec3 tonemap(const vec3 radiance) {
+	const float monitorGamma = 2.0;
+	return pow(radiance, vec3(1.0 / monitorGamma));
+}
+
+void main()
+{
+	// Setup scene
+	Scene scene;
+	scene.ambient = vec3(0.12, 0.15, 0.2);
+
+	// Lights
+	scene.lights[0].position = vec3(5, 15, -5);
+	scene.lights[0].color    = 0.5 * vec3(0.1, 0.2, 1.0);
+
+	scene.lights[1].position = vec3(-15, 5, 2);
+	scene.lights[1].color    = 0.5 * vec3(0.9, 0.5, 0.1);
+
+	// Primitives
+	scene.spheres[0].position            	= vec3(10, -5, -16);
+	scene.spheres[0].radius              	= 6.0;
+	scene.spheres[0].material 				= getPaperMaterial();
+
+	scene.spheres[1].position            	= vec3(-8, -1, -13);
+	scene.spheres[1].radius             	= 4.0;
+	scene.spheres[1].material				= getPlasticMaterial();
+
+	scene.spheres[2].position            	= vec3(0, 0.5, -5);
+	scene.spheres[2].radius              	= 2.0;
+	scene.spheres[2].material   			= getGlassMaterial();
+
+	scene.planes[0].normal            		= vec3(0, 1, 0);
+	scene.planes[0].d              			= 4.5;
+	scene.planes[0].material				= getSteelMirrorMaterial();
+
+	scene.cylinders[0].position            	= vec3(-1, 1, -18);
+	scene.cylinders[0].direction            = normalize(vec3(1, 2, -1));
+	scene.cylinders[0].radius         		= 1.5;
+	scene.cylinders[0].material				= getPaperMaterial();
+
+	scene.cylinders[1].position            	= vec3(4, 1, -5);
+	scene.cylinders[1].direction            = normalize(vec3(1, -4, 1));
+	scene.cylinders[1].radius         		= 0.4;
+	scene.cylinders[1].material				= getPlasticMaterial();
+
+	// Compute color for fragment
+	gl_FragColor.rgb = tonemap(colorForFragment(scene, gl_FragCoord.xy));
+	gl_FragColor.a = 1.0;
+}
+`,
+		description: ``,
+		wrapFunctionStart: ``,
+		wrapFunctionEnd: ``
+	});
+
+	UI.tabs.push(
+		{
+		visible: false,
+		type: `x-shader/x-vertex`,
+		title: `Something we would not like to see`,
+		id: `RaytracingDemoVS`,
+		initialValue: ` attribute vec3 position;
+    uniform mat4 modelViewMatrix;
+    uniform mat4 projectionMatrix;
+    void main(void) {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+		description: ``,
+		wrapFunctionStart: ``,
+		wrapFunctionEnd: ``
+	});
+
+	 return UI; 
+}//!setup
+
+var gl;
+function initGL(canvas) {
+	try {
+		gl = canvas.getContext("webgl");
+		gl.viewportWidth = canvas.width;
+		gl.viewportHeight = canvas.height;
+	} catch (e) {
+	}
+	if (!gl) {
+		alert("Could not initialise WebGL, sorry :-(");
+	}
+}
+
+function getShader(gl, id) {
+	var shaderScript = document.getElementById(id);
+	if (!shaderScript) {
+		return null;
+	}
+
+	var str = "";
+	var k = shaderScript.firstChild;
+	while (k) {
+		if (k.nodeType == 3) {
+			str += k.textContent;
+		}
+		k = k.nextSibling;
+	}
+
+	var shader;
+	if (shaderScript.type == "x-shader/x-fragment") {
+		shader = gl.createShader(gl.FRAGMENT_SHADER);
+	} else if (shaderScript.type == "x-shader/x-vertex") {
+		shader = gl.createShader(gl.VERTEX_SHADER);
+	} else {
+		return null;
+	}
+
+	gl.shaderSource(shader, str);
+	gl.compileShader(shader);
+
+	if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+		alert(gl.getShaderInfoLog(shader));
+		return null;
+	}
+
+	return shader;
+}
+
+function RaytracingDemo() {
+}
+
+RaytracingDemo.prototype.initShaders = function() {
+
+	this.shaderProgram = gl.createProgram();
+
+	gl.attachShader(this.shaderProgram, getShader(gl, "RaytracingDemoVS"));
+	gl.attachShader(this.shaderProgram, getShader(gl, "RaytracingDemoFS"));
+	gl.linkProgram(this.shaderProgram);
+
+	if (!gl.getProgramParameter(this.shaderProgram, gl.LINK_STATUS)) {
+		alert("Could not initialise shaders");
+	}
+
+	gl.useProgram(this.shaderProgram);
+
+	this.shaderProgram.vertexPositionAttribute = gl.getAttribLocation(this.shaderProgram, "position");
+	gl.enableVertexAttribArray(this.shaderProgram.vertexPositionAttribute);
+
+	this.shaderProgram.projectionMatrixUniform = gl.getUniformLocation(this.shaderProgram, "projectionMatrix");
+    this.shaderProgram.modelviewMatrixUniform = gl.getUniformLocation(this.shaderProgram, "modelViewMatrix");
+
+    // Add resolution uniform
+    gl.uniform2f(
+		gl.getUniformLocation(this.shaderProgram, "g_resolution"),
+		getRenderTargetWidth(),
+		getRenderTargetHeight());
+}
+
+RaytracingDemo.prototype.initBuffers = function() {
+	this.triangleVertexPositionBuffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, this.triangleVertexPositionBuffer);
+
+	var vertices = [
+		 -1,  -1,  0,
+		 -1,  1,  0,
+		 1,  1,  0,
+
+		 -1,  -1,  0,
+		 1,  -1,  0,
+		 1,  1,  0,
+	 ];
+	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+	this.triangleVertexPositionBuffer.itemSize = 3;
+	this.triangleVertexPositionBuffer.numItems = 3 * 2;
+}
+
+RaytracingDemo.prototype.drawScene = function() {
+
+	var perspectiveMatrix = new J3DIMatrix4();
+	perspectiveMatrix.setUniform(gl, this.shaderProgram.projectionMatrixUniform, false);
+
+	var modelViewMatrix = new J3DIMatrix4();
+	modelViewMatrix.setUniform(gl, this.shaderProgram.modelviewMatrixUniform, false);
+
+	gl.bindBuffer(gl.ARRAY_BUFFER, this.triangleVertexPositionBuffer);
+	gl.vertexAttribPointer(this.shaderProgram.vertexPositionAttribute, this.triangleVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+	gl.drawArrays(gl.TRIANGLES, 0, this.triangleVertexPositionBuffer.numItems);
+}
+
+RaytracingDemo.prototype.run = function() {
+	this.initShaders();
+	this.initBuffers();
+
+	gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+	gl.clear(gl.COLOR_BUFFER_BIT);
+
+	this.drawScene();
+};
+
+function init() {
+
+
+	env = new RaytracingDemo();
+	env.run();
+
+    return env;
+}
+
+function compute(canvas)
+{
+    env.initShaders();
+    env.initBuffers();
+
+    gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    env.drawScene();
+}
